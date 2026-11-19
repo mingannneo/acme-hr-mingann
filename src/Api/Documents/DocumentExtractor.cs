@@ -11,7 +11,7 @@ public class DocumentExtractor(IClaudeChat claude, ClaudeOptions options)
 
     const string Prompt = """
         Extract the data from this Acme HR document. It is a medical certificate (MC), an expense claim, or something else (kind "other").
-        Dates as yyyy-MM-dd. Numeric dates such as 03/10/2026 are written month first (MM/dd/yyyy).
+        Dates as yyyy-MM-dd. Numeric dates such as 03/10/2026 are written day first (dd/MM/yyyy), as in Malaysia: 03/10/2026 is 3 October 2026.
         Amounts as numbers without currency symbols. Use null for the part that does not apply.
         Copy values exactly as written. Do not fix or invent numbers.
         """;
@@ -65,28 +65,62 @@ public class DocumentExtractor(IClaudeChat claude, ClaudeOptions options)
         },
     };
 
+    /// <summary>
+    /// Claude gives the shape (JSON schema), C# decides if it is right (DocumentValidator), a person reviews the rest.
+    /// At most <see cref="MaxAttempts"/> calls: one retry with the exact problems, then NeedsReview.
+    /// </summary>
     public async Task<ExtractionResult> ExtractAsync(byte[] pdf, CancellationToken ct = default)
     {
         var history = new List<MessageParam> { DocumentMessage(pdf) };
+        Extraction? data = null;
+        List<string> problems = [];
 
-        // TODO (Lab 6): this first version trusts whatever comes back. Make it safe:
-        //  1. Send OutputConfig = new OutputConfig { Format = new JsonOutputFormat { Schema = Schema } }.
-        //  2. Handle a stop_reason other than end_turn: return NeedsReview.
-        //  3. Parse the text into Extraction (catch JsonException) and run DocumentValidator.Check.
-        //  4. If there are problems, retry ONCE: add Claude's answer and the exact problems to history.
-        //     Say "correct only reading mistakes; if the document itself is wrong, keep its values as written".
-        //     Otherwise Claude may "fix" a wrong document (samples 08, 10, 17) so the checks pass.
-        //  5. Still failing, or kind "other": return NeedsReview with the problems. Max MaxAttempts calls.
-        var res = await claude.SendAsync(new MessageCreateParams
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
         {
-            Model = options.Model,
-            MaxTokens = 1024,
-            System = Prompt,
-            Messages = history.ToList(),
-        }, ct);
+            var res = await claude.SendAsync(new MessageCreateParams
+            {
+                Model = options.Model,
+                MaxTokens = 1024,
+                System = Prompt,
+                Messages = history.ToList(), // a copy: each request keeps the history as it was when sent
+                OutputConfig = new OutputConfig { Format = new JsonOutputFormat { Schema = Schema } },
+            }, ct);
 
-        var text = string.Concat(res.Content.Select(b => b.TryPickText(out var t) ? t.Text : ""));
-        var data = JsonSerializer.Deserialize<Extraction>(text);
-        return new ExtractionResult(data, DocumentStatus.Valid, [], 1);
+            // max_tokens means cut-off JSON; a refusal will not improve on retry. A person looks at it.
+            if (res.StopReason != StopReason.EndTurn)
+                return new ExtractionResult(data, DocumentStatus.NeedsReview, [$"Claude stopped early (stop reason: {res.StopReason?.Raw() ?? "unknown"})"], attempt);
+
+            var text = string.Concat(res.Content.Select(b => b.TryPickText(out var t) ? t.Text : ""));
+            if (TryParse(text, out var parsed))
+            {
+                data = parsed;
+                problems = DocumentValidator.Check(parsed);
+                if (problems.Count == 0) return new ExtractionResult(data, DocumentStatus.Valid, [], attempt);
+                // A retry cannot turn a letter into an MC or a claim.
+                if (parsed.Kind == "other") return new ExtractionResult(data, DocumentStatus.NeedsReview, problems, attempt);
+            }
+            else problems = ["the answer is not valid JSON"];
+
+            if (attempt == MaxAttempts) return new ExtractionResult(data, DocumentStatus.NeedsReview, problems, attempt);
+
+            history.Add(new AssistantMessageParam { Content = text });
+            history.Add(new UserMessageParam { Content = RetryMessage(problems) });
+        }
+
+        return new ExtractionResult(data, DocumentStatus.NeedsReview, problems, MaxAttempts); // not reached
+    }
+
+    /// <summary>The retry: the exact problems, and the rule that a document wrong on paper stays as written
+    /// (samples 08, 10, 17 must end in NeedsReview, not be "fixed" so the checks pass).</summary>
+    static string RetryMessage(IEnumerable<string> problems) =>
+        "Your answer has these problems:\n" + string.Concat(problems.Select(p => $"- {p}\n")) +
+        "\nRead the document again and correct only reading mistakes. If the document itself is wrong, keep its values as written: " +
+        "do not change numbers or dates to make the checks pass.";
+
+    static bool TryParse(string text, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Extraction? data)
+    {
+        try { data = JsonSerializer.Deserialize<Extraction>(text); }
+        catch (JsonException) { data = null; }
+        return data is not null;
     }
 }
