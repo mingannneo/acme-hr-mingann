@@ -8,7 +8,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }), // FormData sets its own
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
@@ -63,4 +63,14 @@ export function currentEmployee(): Employee | null {
 
 export function currentEmployeeId(): number {
   return currentEmployee()?.id ?? 0;
+}
+
+export type StoredDocument = { id: number; employeeId: number; employeeName?: string; fileName: string; kind: string; extractedJson: string; status: "Valid" | "NeedsReview"; problems: string; createdAt: string };
+
+/** Opens a stored document's PDF in a new tab (signed in, so it cannot be a plain link). */
+export async function openDocumentFile(id: number) {
+  const token = window.localStorage.getItem(TOKEN_KEY);
+  const res = await fetch(`${BASE}/documents/${id}/file`, { headers: token ? { Authorization: `Bearer ${token}` } : {}, cache: "no-store" });
+  if (!res.ok) throw new Error(res.status === 403 ? "Only the sender and HR may open this document" : `${res.status} ${res.statusText}`);
+  window.open(URL.createObjectURL(await res.blob()), "_blank");
 }

@@ -26,4 +26,8 @@
     <ProjectReference Include="..\Api\Api.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="../../seed/documents/*.pdf" LinkBase="documents" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

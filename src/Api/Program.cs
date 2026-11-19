@@ -34,6 +34,7 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AcmeDb>();
     db.Database.EnsureCreated();
+    SchemaUpgrade.AddMissingTables(db);
     Seed.Run(db);
     var postgres = !string.IsNullOrWhiteSpace(pg);
     SeedLogins.Run(db, SeedLogins.PasswordFor(postgres, builder.Configuration["SEED_USER_PASSWORD"]));
