@@ -27,6 +27,20 @@ public class LeaveService(AcmeDb db)
         return new LeaveBalance(employeeId, emp.AnnualEntitlement, used, pending, emp.AnnualEntitlement - used - pending);
     }
 
+    /// <summary>
+    /// Days taken this year, for the employee summary card. Only Approved leave counts as taken
+    /// (Pending and Rejected do not), matching Used in <see cref="GetBalanceAsync"/>. Null for an unknown employee.
+    /// </summary>
+    public async Task<decimal?> DaysTakenThisYearAsync(int employeeId)
+    {
+        if (!await db.Employees.AnyAsync(e => e.Id == employeeId)) return null;
+        var year = DateTime.UtcNow.Year;
+        var requests = await db.LeaveRequests
+            .Where(r => r.EmployeeId == employeeId && r.Status == LeaveStatus.Approved && r.StartDate.Year == year)
+            .ToListAsync();
+        return requests.Sum(DaysOf);
+    }
+
     public Task<List<LeaveRequest>> ListAsync(int? employeeId) =>
         db.LeaveRequests.Where(r => employeeId == null || r.EmployeeId == employeeId)
             .OrderByDescending(r => r.StartDate).ToListAsync();
